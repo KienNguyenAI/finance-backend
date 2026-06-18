@@ -91,6 +91,24 @@ async function initDatabase() {
             )
         `);
 
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS deleted_items (
+                account_id INTEGER NOT NULL,
+                entity_type VARCHAR(50) NOT NULL,
+                entity_id VARCHAR(255) NOT NULL,
+                deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (account_id, entity_type, entity_id)
+            )
+        `);
+
+        // Alter tables to add last_modified if not exists
+        const tables = ['transactions', 'categories', 'savings_goals', 'monthly_budgets', 'recurring_transactions'];
+        for (const table of tables) {
+            await pool.query(`
+                ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS last_modified BIGINT DEFAULT 0
+            `);
+        }
+
         console.log('Database tables initialized successfully.');
     } catch (err) {
         console.error('Failed to initialize database:', err.message);
@@ -190,9 +208,20 @@ app.post('/api/auth/login', async (req, res) => {
 
 // 3. API Đồng bộ dữ liệu (Sync Comprehensive Data)
 app.post('/api/sync/transactions', async (req, res) => {
-    const { accountId, transactions, categories, savingsGoals, monthlyBudgets, recurringTransactions, isFirstSync } = req.body;
+    const { accountId, transactions, categories, savingsGoals, monthlyBudgets, recurringTransactions, isFirstSync, lastSyncTimestamp } = req.body;
     if (accountId === undefined) {
         return res.status(400).json({ message: 'Thiếu accountId hợp lệ' });
+    }
+
+    const clientLastSync = lastSyncTimestamp ? parseInt(lastSyncTimestamp) : 0;
+
+    function normalizeString(str) {
+        if (!str) return '';
+        return str.toString().toLowerCase()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/đ/g, 'd')
+            .replace(/[^a-z0-9]/g, '');
     }
 
     const client = await pool.connect();
@@ -200,183 +229,483 @@ app.post('/api/sync/transactions', async (req, res) => {
         await client.query('BEGIN');
 
         // ==========================================
-        // 1. Synchronize Transactions
+        // 1. Synchronize Categories
         // ==========================================
-        const serverTxResult = await client.query(
-            'SELECT * FROM transactions WHERE account_id = $1',
-            [accountId]
-        );
-        const serverTxMap = new Map();
-        if (isFirstSync) {
-            serverTxResult.rows.forEach(row => serverTxMap.set(row.id, row));
-        }
-
-        const clientTxs = transactions || [];
-        clientTxs.forEach(ct => {
-            serverTxMap.set(ct.id, {
-                id: ct.id,
-                account_id: ct.accountId || accountId,
-                title: ct.title,
-                amount: ct.amount,
-                type: ct.type,
-                category: ct.category,
-                date: ct.date,
-                note: ct.note || ''
-            });
-        });
-
-        await client.query('DELETE FROM transactions WHERE account_id = $1', [accountId]);
-        const mergedTxs = Array.from(serverTxMap.values());
-        for (const tx of mergedTxs) {
-            await client.query(
-                `INSERT INTO transactions (id, account_id, title, amount, type, category, date, note)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-                [tx.id, tx.account_id, tx.title, tx.amount, tx.type, tx.category, tx.date, tx.note || '']
-            );
-        }
-
-        // ==========================================
-        // 2. Synchronize Categories
-        // ==========================================
-        const serverCatResult = await client.query(
-            'SELECT * FROM categories WHERE account_id = $1',
-            [accountId]
-        );
-        const serverCatMap = new Map();
-        if (isFirstSync) {
-            serverCatResult.rows.forEach(row => serverCatMap.set(row.id, row));
-        }
+        const serverCatResult = await client.query('SELECT * FROM categories WHERE account_id = $1', [accountId]);
+        const serverCats = serverCatResult.rows;
 
         const clientCats = categories || [];
+        const mergedCats = [];
+        const clientCatIdMap = new Map(); // Maps client original ID -> target ID
+
+        const deletedCatIds = new Set();
+        if (clientLastSync > 0) {
+            serverCats.forEach(sc => {
+                const isSent = clientCats.some(cc => cc.id === sc.id);
+                if (!isSent && parseInt(sc.last_modified || 0) <= clientLastSync) {
+                    deletedCatIds.add(sc.id);
+                }
+            });
+        }
+
+        const activeServerCats = serverCats.filter(sc => !deletedCatIds.has(sc.id));
+        const activeServerCatByName = new Map();
+        activeServerCats.forEach(row => {
+            activeServerCatByName.set(normalizeString(row.name), row);
+        });
+
+        let maxCatId = Math.max(0, ...serverCats.map(r => r.id), ...clientCats.map(c => c.id));
+
         clientCats.forEach(cc => {
-            serverCatMap.set(cc.id, {
-                id: cc.id,
-                account_id: cc.accountId || accountId,
-                name: cc.name,
-                color: cc.color,
-                icon_name: cc.iconName,
-                budget_limit: cc.budgetLimit
+            const normName = normalizeString(cc.name);
+            const serverCat = activeServerCatByName.get(normName);
+
+            if (serverCat) {
+                const isChanged = serverCat.color !== cc.color ||
+                                  serverCat.icon_name !== cc.iconName ||
+                                  parseInt(serverCat.budget_limit) !== parseInt(cc.budgetLimit);
+                
+                const mergedCat = {
+                    id: serverCat.id,
+                    account_id: accountId,
+                    name: cc.name,
+                    color: cc.color,
+                    icon_name: cc.iconName,
+                    budget_limit: Math.max(parseInt(serverCat.budget_limit || 0), parseInt(cc.budgetLimit || 0)),
+                    last_modified: isChanged ? Date.now() : parseInt(serverCat.last_modified || 0)
+                };
+                mergedCats.push(mergedCat);
+                clientCatIdMap.set(cc.id, serverCat.id);
+                activeServerCatByName.delete(normName);
+            } else {
+                const idExists = activeServerCats.some(sc => sc.id === cc.id);
+                let targetId = cc.id;
+                if (idExists) {
+                    maxCatId++;
+                    targetId = maxCatId;
+                }
+                const newCat = {
+                    id: targetId,
+                    account_id: accountId,
+                    name: cc.name,
+                    color: cc.color,
+                    icon_name: cc.iconName,
+                    budget_limit: cc.budgetLimit || 0,
+                    last_modified: Date.now()
+                };
+                mergedCats.push(newCat);
+                clientCatIdMap.set(cc.id, targetId);
+            }
+        });
+
+        activeServerCatByName.forEach(sc => {
+            mergedCats.push({
+                id: sc.id,
+                account_id: accountId,
+                name: sc.name,
+                color: sc.color,
+                icon_name: sc.icon_name,
+                budget_limit: parseInt(sc.budget_limit || 0),
+                last_modified: parseInt(sc.last_modified || 0)
             });
         });
 
         await client.query('DELETE FROM categories WHERE account_id = $1', [accountId]);
-        const mergedCats = Array.from(serverCatMap.values());
         for (const cat of mergedCats) {
             await client.query(
-                `INSERT INTO categories (id, account_id, name, color, icon_name, budget_limit)
-                 VALUES ($1, $2, $3, $4, $5, $6)`,
-                [cat.id, cat.account_id, cat.name, cat.color, cat.icon_name, cat.budget_limit]
+                `INSERT INTO categories (id, account_id, name, color, icon_name, budget_limit, last_modified)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                [cat.id, cat.account_id, cat.name, cat.color, cat.icon_name, cat.budget_limit, cat.last_modified]
             );
         }
 
         // ==========================================
-        // 3. Synchronize Savings Goals
+        // 2. Synchronize Savings Goals
         // ==========================================
-        const serverSgResult = await client.query(
-            'SELECT * FROM savings_goals WHERE account_id = $1',
-            [accountId]
-        );
-        const serverSgMap = new Map();
-        if (isFirstSync) {
-            serverSgResult.rows.forEach(row => serverSgMap.set(row.id, row));
-        }
+        const serverSgResult = await client.query('SELECT * FROM savings_goals WHERE account_id = $1', [accountId]);
+        const serverSgs = serverSgResult.rows;
 
         const clientSgs = savingsGoals || [];
+        const mergedSgs = [];
+
+        const deletedSgIds = new Set();
+        if (clientLastSync > 0) {
+            serverSgs.forEach(sc => {
+                const isSent = clientSgs.some(cc => cc.id === sc.id);
+                if (!isSent && parseInt(sc.last_modified || 0) <= clientLastSync) {
+                    deletedSgIds.add(sc.id);
+                }
+            });
+        }
+
+        const activeServerSgs = serverSgs.filter(sc => !deletedSgIds.has(sc.id));
+        const activeServerSgByTitle = new Map();
+        activeServerSgs.forEach(row => {
+            activeServerSgByTitle.set(normalizeString(row.title), row);
+        });
+
+        let maxSgId = Math.max(0, ...serverSgs.map(r => r.id), ...clientSgs.map(s => s.id));
+
         clientSgs.forEach(csg => {
-            serverSgMap.set(csg.id, {
-                id: csg.id,
-                account_id: csg.accountId || accountId,
-                title: csg.title,
-                target_amount: csg.targetAmount,
-                current_amount: csg.currentAmount,
-                color: csg.color,
-                icon_name: csg.iconName
+            const normTitle = normalizeString(csg.title);
+            const serverSg = activeServerSgByTitle.get(normTitle);
+
+            if (serverSg) {
+                const isChanged = serverSg.color !== csg.color ||
+                                  serverSg.icon_name !== csg.iconName ||
+                                  parseFloat(serverSg.target_amount) !== parseFloat(csg.targetAmount) ||
+                                  parseFloat(serverSg.current_amount) !== parseFloat(csg.currentAmount);
+
+                const progressServer = parseFloat(serverSg.current_amount || 0) / parseFloat(serverSg.target_amount || 1);
+                const progressClient = parseFloat(csg.currentAmount || 0) / parseFloat(csg.targetAmount || 1);
+                const keepClientAmount = progressClient >= progressServer;
+
+                const mergedSg = {
+                    id: serverSg.id,
+                    account_id: accountId,
+                    title: csg.title,
+                    target_amount: keepClientAmount ? csg.targetAmount : parseFloat(serverSg.target_amount),
+                    current_amount: keepClientAmount ? csg.currentAmount : parseFloat(serverSg.current_amount),
+                    color: csg.color,
+                    icon_name: csg.iconName,
+                    last_modified: isChanged ? Date.now() : parseInt(serverSg.last_modified || 0)
+                };
+                mergedSgs.push(mergedSg);
+                activeServerSgByTitle.delete(normTitle);
+            } else {
+                const idExists = activeServerSgs.some(sc => sc.id === csg.id);
+                let targetId = csg.id;
+                if (idExists) {
+                    maxSgId++;
+                    targetId = maxSgId;
+                }
+                mergedSgs.push({
+                    id: targetId,
+                    account_id: accountId,
+                    title: csg.title,
+                    target_amount: csg.targetAmount,
+                    current_amount: csg.currentAmount || 0,
+                    color: csg.color,
+                    icon_name: csg.iconName,
+                    last_modified: Date.now()
+                });
+            }
+        });
+
+        activeServerSgByTitle.forEach(sc => {
+            mergedSgs.push({
+                id: sc.id,
+                account_id: accountId,
+                title: sc.title,
+                target_amount: parseFloat(sc.target_amount),
+                current_amount: parseFloat(sc.current_amount),
+                color: sc.color,
+                icon_name: sc.icon_name,
+                last_modified: parseInt(sc.last_modified || 0)
             });
         });
 
         await client.query('DELETE FROM savings_goals WHERE account_id = $1', [accountId]);
-        const mergedSgs = Array.from(serverSgMap.values());
         for (const sg of mergedSgs) {
             await client.query(
-                `INSERT INTO savings_goals (id, account_id, title, target_amount, current_amount, color, icon_name)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-                [sg.id, sg.account_id, sg.title, sg.target_amount, sg.current_amount, sg.color, sg.icon_name]
+                `INSERT INTO savings_goals (id, account_id, title, target_amount, current_amount, color, icon_name, last_modified)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+                [sg.id, sg.account_id, sg.title, sg.target_amount, sg.current_amount, sg.color, sg.icon_name, sg.last_modified]
             );
         }
 
         // ==========================================
-        // 4. Synchronize Monthly Budgets
+        // 3. Synchronize Monthly Budgets
         // ==========================================
-        const serverMbResult = await client.query(
-            'SELECT * FROM monthly_budgets WHERE account_id = $1',
-            [accountId]
-        );
-        const serverMbMap = new Map();
-        if (isFirstSync) {
-            serverMbResult.rows.forEach(row => serverMbMap.set(row.id, row));
-        }
+        const serverMbResult = await client.query('SELECT * FROM monthly_budgets WHERE account_id = $1', [accountId]);
+        const serverMbs = serverMbResult.rows;
 
         const clientMbs = monthlyBudgets || [];
+        const mergedMbs = [];
+
+        const deletedMbIds = new Set();
+        if (clientLastSync > 0) {
+            serverMbs.forEach(sc => {
+                const isSent = clientMbs.some(cc => cc.id === sc.id);
+                if (!isSent && parseInt(sc.last_modified || 0) <= clientLastSync) {
+                    deletedMbIds.add(sc.id);
+                }
+            });
+        }
+
+        const activeServerMbs = serverMbs.filter(sc => !deletedMbIds.has(sc.id));
+        const activeServerMbByMonth = new Map();
+        activeServerMbs.forEach(row => {
+            activeServerMbByMonth.set(row.month_year, row);
+        });
+
+        let maxMbId = Math.max(0, ...serverMbs.map(r => r.id), ...clientMbs.map(b => b.id));
+
         clientMbs.forEach(cmb => {
-            serverMbMap.set(cmb.id, {
-                id: cmb.id,
-                account_id: cmb.accountId || accountId,
-                month_year: cmb.monthYear,
-                limit_amount: cmb.limitAmount
+            const serverMb = activeServerMbByMonth.get(cmb.monthYear);
+
+            if (serverMb) {
+                const isChanged = parseFloat(serverMb.limit_amount) !== parseFloat(cmb.limitAmount);
+                const mergedMb = {
+                    id: serverMb.id,
+                    account_id: accountId,
+                    month_year: cmb.monthYear,
+                    limit_amount: cmb.limitAmount,
+                    last_modified: isChanged ? Date.now() : parseInt(serverMb.last_modified || 0)
+                };
+                mergedMbs.push(mergedMb);
+                activeServerMbByMonth.delete(cmb.monthYear);
+            } else {
+                const idExists = activeServerMbs.some(sc => sc.id === cmb.id);
+                let targetId = cmb.id;
+                if (idExists) {
+                    maxMbId++;
+                    targetId = maxMbId;
+                }
+                mergedMbs.push({
+                    id: targetId,
+                    account_id: accountId,
+                    month_year: cmb.monthYear,
+                    limit_amount: cmb.limitAmount,
+                    last_modified: Date.now()
+                });
+            }
+        });
+
+        activeServerMbByMonth.forEach(sc => {
+            mergedMbs.push({
+                id: sc.id,
+                account_id: accountId,
+                month_year: sc.month_year,
+                limit_amount: parseFloat(sc.limit_amount),
+                last_modified: parseInt(sc.last_modified || 0)
             });
         });
 
         await client.query('DELETE FROM monthly_budgets WHERE account_id = $1', [accountId]);
-        const mergedMbs = Array.from(serverMbMap.values());
         for (const mb of mergedMbs) {
             await client.query(
-                `INSERT INTO monthly_budgets (id, account_id, month_year, limit_amount)
-                 VALUES ($1, $2, $3, $4)`,
-                [mb.id, mb.account_id, mb.month_year, mb.limit_amount]
+                `INSERT INTO monthly_budgets (id, account_id, month_year, limit_amount, last_modified)
+                 VALUES ($1, $2, $3, $4, $5)`,
+                [mb.id, mb.account_id, mb.month_year, mb.limit_amount, mb.last_modified]
             );
         }
 
         // ==========================================
-        // 5. Synchronize Recurring Transactions
+        // 4. Synchronize Recurring Transactions
         // ==========================================
-        const serverRtResult = await client.query(
-            'SELECT * FROM recurring_transactions WHERE account_id = $1',
-            [accountId]
-        );
-        const serverRtMap = new Map();
-        if (isFirstSync) {
-            serverRtResult.rows.forEach(row => serverRtMap.set(row.id, row));
-        }
+        const serverRtResult = await client.query('SELECT * FROM recurring_transactions WHERE account_id = $1', [accountId]);
+        const serverRts = serverRtResult.rows;
 
         const clientRts = recurringTransactions || [];
+        const mergedRts = [];
+
+        const deletedRtIds = new Set();
+        if (clientLastSync > 0) {
+            serverRts.forEach(sc => {
+                const isSent = clientRts.some(cc => cc.id === sc.id);
+                if (!isSent && parseInt(sc.last_modified || 0) <= clientLastSync) {
+                    deletedRtIds.add(sc.id);
+                }
+            });
+        }
+
+        const activeServerRts = serverRts.filter(sc => !deletedRtIds.has(sc.id));
+        const activeServerRtByTitle = new Map();
+        activeServerRts.forEach(row => {
+            activeServerRtByTitle.set(normalizeString(row.title), row);
+        });
+
+        let maxRtId = Math.max(0, ...serverRts.map(r => r.id), ...clientRts.map(r => r.id));
+
         clientRts.forEach(crt => {
-            serverRtMap.set(crt.id, {
-                id: crt.id,
-                account_id: crt.accountId || accountId,
-                title: crt.title,
-                amount: crt.amount,
-                type: crt.type,
-                category: crt.category,
-                note: crt.note || '',
-                frequency: crt.frequency,
-                day_of_week: crt.dayOfWeek,
-                day_of_month: crt.dayOfMonth,
-                next_execution_date: crt.nextExecutionDate,
-                is_enabled: crt.isEnabled,
-                created_date: crt.createdDate
+            const normTitle = normalizeString(crt.title);
+            const serverRt = activeServerRtByTitle.get(normTitle);
+
+            if (serverRt) {
+                const isChanged = parseFloat(serverRt.amount) !== parseFloat(crt.amount) ||
+                                  serverRt.type !== crt.type ||
+                                  serverRt.category !== crt.category ||
+                                  serverRt.note !== crt.note ||
+                                  serverRt.frequency !== crt.frequency ||
+                                  serverRt.day_of_week !== crt.dayOfWeek ||
+                                  serverRt.day_of_month !== crt.dayOfMonth ||
+                                  parseInt(serverRt.next_execution_date) !== parseInt(crt.nextExecutionDate) ||
+                                  !!serverRt.is_enabled !== !!crt.isEnabled;
+
+                const mergedRt = {
+                    id: serverRt.id,
+                    account_id: accountId,
+                    title: crt.title,
+                    amount: crt.amount,
+                    type: crt.type,
+                    category: crt.category,
+                    note: crt.note || '',
+                    frequency: crt.frequency,
+                    day_of_week: crt.dayOfWeek,
+                    day_of_month: crt.dayOfMonth,
+                    next_execution_date: crt.nextExecutionDate,
+                    is_enabled: crt.isEnabled,
+                    created_date: crt.createdDate || parseInt(serverRt.created_date),
+                    last_modified: isChanged ? Date.now() : parseInt(serverRt.last_modified || 0)
+                };
+                mergedRts.push(mergedRt);
+                activeServerRtByTitle.delete(normTitle);
+            } else {
+                const idExists = activeServerRts.some(sc => sc.id === crt.id);
+                let targetId = crt.id;
+                if (idExists) {
+                    maxRtId++;
+                    targetId = maxRtId;
+                }
+                mergedRts.push({
+                    id: targetId,
+                    account_id: accountId,
+                    title: crt.title,
+                    amount: crt.amount,
+                    type: crt.type,
+                    category: crt.category,
+                    note: crt.note || '',
+                    frequency: crt.frequency,
+                    day_of_week: crt.dayOfWeek,
+                    day_of_month: crt.dayOfMonth,
+                    next_execution_date: crt.nextExecutionDate,
+                    is_enabled: crt.isEnabled,
+                    created_date: crt.createdDate,
+                    last_modified: Date.now()
+                });
+            }
+        });
+
+        activeServerRtByTitle.forEach(sc => {
+            mergedRts.push({
+                id: sc.id,
+                account_id: accountId,
+                title: sc.title,
+                amount: parseFloat(sc.amount),
+                type: sc.type,
+                category: sc.category,
+                note: sc.note || '',
+                frequency: sc.frequency,
+                day_of_week: sc.day_of_week,
+                day_of_month: sc.day_of_month,
+                next_execution_date: parseInt(sc.next_execution_date),
+                is_enabled: !!sc.is_enabled,
+                created_date: parseInt(sc.created_date),
+                last_modified: parseInt(sc.last_modified || 0)
             });
         });
 
         await client.query('DELETE FROM recurring_transactions WHERE account_id = $1', [accountId]);
-        const mergedRts = Array.from(serverRtMap.values());
         for (const rt of mergedRts) {
             await client.query(
-                `INSERT INTO recurring_transactions (id, account_id, title, amount, type, category, note, frequency, day_of_week, day_of_month, next_execution_date, is_enabled, created_date)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+                `INSERT INTO recurring_transactions (id, account_id, title, amount, type, category, note, frequency, day_of_week, day_of_month, next_execution_date, is_enabled, created_date, last_modified)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
                 [
                     rt.id, rt.account_id, rt.title, rt.amount, rt.type, rt.category, rt.note || '',
-                    rt.frequency, rt.day_of_week, rt.day_of_month, rt.next_execution_date, rt.is_enabled, rt.created_date
+                    rt.frequency, rt.day_of_week, rt.day_of_month, rt.next_execution_date, rt.is_enabled, rt.created_date, rt.last_modified
                 ]
+            );
+        }
+
+        // ==========================================
+        // 5. Synchronize Transactions
+        // ==========================================
+        const serverTxResult = await client.query('SELECT * FROM transactions WHERE account_id = $1', [accountId]);
+        const serverTxs = serverTxResult.rows;
+
+        const clientTxs = transactions || [];
+        const mergedTxs = [];
+
+        const getTxKey = (title, date, amount) => {
+            const normTitle = normalizeString(title);
+            const day = Math.floor(parseInt(date) / (24 * 60 * 60 * 1000));
+            const roundedAmount = Math.round(parseFloat(amount));
+            return `${normTitle}_${day}_${roundedAmount}`;
+        };
+
+        const deletedTxIds = new Set();
+        if (clientLastSync > 0) {
+            serverTxs.forEach(sc => {
+                const isSent = clientTxs.some(cc => cc.id === sc.id);
+                if (!isSent && parseInt(sc.last_modified || 0) <= clientLastSync) {
+                    deletedTxIds.add(sc.id);
+                }
+            });
+        }
+
+        const activeServerTxs = serverTxs.filter(sc => !deletedTxIds.has(sc.id));
+        const activeServerTxByKey = new Map();
+        activeServerTxs.forEach(row => {
+            const key = getTxKey(row.title, row.date, row.amount);
+            activeServerTxByKey.set(key, row);
+        });
+
+        let maxTxId = Math.max(0, ...serverTxs.map(r => r.id), ...clientTxs.map(t => t.id));
+
+        clientTxs.forEach(ct => {
+            const key = getTxKey(ct.title, ct.date, ct.amount);
+            const serverTx = activeServerTxByKey.get(key);
+
+            if (serverTx) {
+                const isChanged = serverTx.note !== ct.note ||
+                                  serverTx.category !== ct.category ||
+                                  serverTx.type !== ct.type;
+
+                const mergedTx = {
+                    id: serverTx.id,
+                    account_id: accountId,
+                    title: ct.title,
+                    amount: ct.amount,
+                    type: ct.type,
+                    category: ct.category,
+                    date: ct.date,
+                    note: ct.note || '',
+                    last_modified: isChanged ? Date.now() : parseInt(serverTx.last_modified || 0)
+                };
+                mergedTxs.push(mergedTx);
+                activeServerTxByKey.delete(key);
+            } else {
+                const idExists = activeServerTxs.some(sc => sc.id === ct.id);
+                let targetId = ct.id;
+                if (idExists) {
+                    maxTxId++;
+                    targetId = maxTxId;
+                }
+                mergedTxs.push({
+                    id: targetId,
+                    account_id: accountId,
+                    title: ct.title,
+                    amount: ct.amount,
+                    type: ct.type,
+                    category: ct.category,
+                    date: ct.date,
+                    note: ct.note || '',
+                    last_modified: Date.now()
+                });
+            }
+        });
+
+        activeServerTxByKey.forEach(sc => {
+            mergedTxs.push({
+                id: sc.id,
+                account_id: accountId,
+                title: sc.title,
+                amount: parseFloat(sc.amount),
+                type: sc.type,
+                category: sc.category,
+                date: parseInt(sc.date),
+                note: sc.note || '',
+                last_modified: parseInt(sc.last_modified || 0)
+            });
+        });
+
+        await client.query('DELETE FROM transactions WHERE account_id = $1', [accountId]);
+        for (const tx of mergedTxs) {
+            await client.query(
+                `INSERT INTO transactions (id, account_id, title, amount, type, category, date, note, last_modified)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+                [tx.id, tx.account_id, tx.title, tx.amount, tx.type, tx.category, tx.date, tx.note || '', tx.last_modified]
             );
         }
 
