@@ -190,7 +190,7 @@ app.post('/api/auth/login', async (req, res) => {
 
 // 3. API Đồng bộ dữ liệu (Sync Comprehensive Data)
 app.post('/api/sync/transactions', async (req, res) => {
-    const { accountId, transactions, categories, savingsGoals, monthlyBudgets, recurringTransactions } = req.body;
+    const { accountId, transactions, categories, savingsGoals, monthlyBudgets, recurringTransactions, isFirstSync } = req.body;
     if (accountId === undefined) {
         return res.status(400).json({ message: 'Thiếu accountId hợp lệ' });
     }
@@ -207,7 +207,9 @@ app.post('/api/sync/transactions', async (req, res) => {
             [accountId]
         );
         const serverTxMap = new Map();
-        serverTxResult.rows.forEach(row => serverTxMap.set(row.id, row));
+        if (isFirstSync) {
+            serverTxResult.rows.forEach(row => serverTxMap.set(row.id, row));
+        }
 
         const clientTxs = transactions || [];
         clientTxs.forEach(ct => {
@@ -241,7 +243,9 @@ app.post('/api/sync/transactions', async (req, res) => {
             [accountId]
         );
         const serverCatMap = new Map();
-        serverCatResult.rows.forEach(row => serverCatMap.set(row.id, row));
+        if (isFirstSync) {
+            serverCatResult.rows.forEach(row => serverCatMap.set(row.id, row));
+        }
 
         const clientCats = categories || [];
         clientCats.forEach(cc => {
@@ -273,7 +277,9 @@ app.post('/api/sync/transactions', async (req, res) => {
             [accountId]
         );
         const serverSgMap = new Map();
-        serverSgResult.rows.forEach(row => serverSgMap.set(row.id, row));
+        if (isFirstSync) {
+            serverSgResult.rows.forEach(row => serverSgMap.set(row.id, row));
+        }
 
         const clientSgs = savingsGoals || [];
         clientSgs.forEach(csg => {
@@ -306,7 +312,9 @@ app.post('/api/sync/transactions', async (req, res) => {
             [accountId]
         );
         const serverMbMap = new Map();
-        serverMbResult.rows.forEach(row => serverMbMap.set(row.id, row));
+        if (isFirstSync) {
+            serverMbResult.rows.forEach(row => serverMbMap.set(row.id, row));
+        }
 
         const clientMbs = monthlyBudgets || [];
         clientMbs.forEach(cmb => {
@@ -336,7 +344,9 @@ app.post('/api/sync/transactions', async (req, res) => {
             [accountId]
         );
         const serverRtMap = new Map();
-        serverRtResult.rows.forEach(row => serverRtMap.set(row.id, row));
+        if (isFirstSync) {
+            serverRtResult.rows.forEach(row => serverRtMap.set(row.id, row));
+        }
 
         const clientRts = recurringTransactions || [];
         clientRts.forEach(crt => {
