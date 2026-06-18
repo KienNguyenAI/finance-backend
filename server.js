@@ -49,9 +49,14 @@ app.use((req, res, next) => {
     next();
 });
 
-// Base Route - Health check
+const path = require('path');
+
+// Serve static files from 'public' folder
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Base Route - Admin Dashboard
 app.get('/', (req, res) => {
-    res.send('Finance App API Backend is running! (PostgreSQL connected)');
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 // 1. API Đăng ký
@@ -197,6 +202,54 @@ app.post('/api/sync/transactions', async (req, res) => {
         res.status(500).json({ message: 'Lỗi đồng bộ: ' + err.message });
     } finally {
         client.release();
+    }
+});
+
+// 4. API Thống kê cho Admin Dashboard
+app.get('/api/admin/summary', async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT 
+                u.id, 
+                u.name, 
+                u.email, 
+                u.created_at, 
+                COUNT(t.id)::integer as transaction_count
+            FROM users u
+            LEFT JOIN transactions t ON u.id = t.account_id
+            GROUP BY u.id
+            ORDER BY u.created_at DESC
+        `);
+        
+        const totalUsers = result.rows.length;
+        const totalTransactionsRes = await pool.query('SELECT COUNT(*)::integer as count FROM transactions');
+        const totalTransactions = totalTransactionsRes.rows[0].count;
+
+        res.status(200).json({
+            users: result.rows,
+            metrics: {
+                totalUsers,
+                totalTransactions
+            }
+        });
+    } catch (err) {
+        console.error('Admin summary error:', err.message);
+        res.status(500).json({ message: 'Lỗi hệ thống: ' + err.message });
+    }
+});
+
+// 5. API Lấy giao dịch chi tiết của 1 user (cho admin)
+app.get('/api/admin/users/:id/transactions', async (req, res) => {
+    const userId = req.params.id;
+    try {
+        const result = await pool.query(
+            'SELECT id, title, amount, type, category, date, note FROM transactions WHERE account_id = $1 ORDER BY date DESC',
+            [userId]
+        );
+        res.status(200).json({ transactions: result.rows });
+    } catch (err) {
+        console.error('Admin transactions error:', err.message);
+        res.status(500).json({ message: 'Lỗi hệ thống: ' + err.message });
     }
 });
 
