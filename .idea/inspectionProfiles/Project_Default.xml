@@ -1,0 +1,23 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="PyYAML" />
+          <option value="python-dotenv" />
+          <option value="numpy" />
+          <option value="pandas" />
+          <option value="scikit-learn" />
+          <option value="joblib" />
+          <option value="yfinance" />
+          <option value="fredapi" />
+          <option value="tensorflow" />
+          <option value="mlflow" />
+          <option value="flask" />
+          <option value="matplotlib" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>
