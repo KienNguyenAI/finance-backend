@@ -629,14 +629,13 @@
                     <tr>
                         <th>Người Dùng</th>
                         <th>Ngày Tạo</th>
-                        <th style="min-width: 420px;">Dữ Liệu Đã Đồng Bộ</th>
-                        <th>Hành Động</th>
+                        <th>Trạng Thái Đồng Bộ</th>
                     </tr>
                 </thead>
                 <tbody id="users-table-body">
                     <!-- Dynamic Rows Loaded Here -->
                     <tr>
-                        <td colspan="4">
+                        <td colspan="3">
                             <div class="loader-container">
                                 <div class="spinner"></div>
                                 <p>Đang tải danh sách tài khoản...</p>
@@ -735,7 +734,7 @@
                 console.error(err);
                 usersTableBody.innerHTML = `
                     <tr>
-                        <td colspan="4" style="text-align: center; color: var(--danger); padding: 3rem;">
+                        <td colspan="3" style="text-align: center; color: var(--danger); padding: 3rem;">
                             ⚠️ Lỗi khi kết nối đến API: ${err.message}
                         </td>
                     </tr>
@@ -749,7 +748,7 @@
             if (users.length === 0) {
                 usersTableBody.innerHTML = `
                     <tr>
-                        <td colspan="4">
+                        <td colspan="3">
                             <div class="empty-state">
                                 <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle></svg>
                                 <p>Không tìm thấy tài khoản người dùng nào đã đồng bộ.</p>
@@ -769,11 +768,23 @@
                     hour: '2-digit',
                     minute: '2-digit'
                 });
-                const txCount = parseInt(user.transaction_count) || 0;
-                const catCount = parseInt(user.category_count) || 0;
-                const sgCount = parseInt(user.savings_goal_count) || 0;
-                const mbCount = parseInt(user.monthly_budget_count) || 0;
-                const rtCount = parseInt(user.recurring_transaction_count) || 0;
+
+                let syncStatusText = "Chưa đồng bộ";
+                let syncStatusBadgeClass = "badge zero";
+                
+                if (user.last_sync_time) {
+                    const syncTime = new Date(user.last_sync_time).toLocaleDateString('vi-VN', {
+                        year: 'numeric',
+                        month: '2-digit',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit'
+                    });
+                    const syncType = user.last_sync_type || 'GET';
+                    syncStatusText = `Đã đồng bộ lúc ${syncTime} (${syncType === 'UPDATE' ? 'Đồng bộ UPDATE' : 'Đồng bộ GET'})`;
+                    syncStatusBadgeClass = syncType === 'UPDATE' ? 'badge category' : 'badge count';
+                }
 
                 return `
                     <tr>
@@ -788,19 +799,9 @@
                         </td>
                         <td>${createdDate}</td>
                         <td>
-                            <div style="display: flex; flex-wrap: wrap; gap: 0.4rem;">
-                                <span class="badge ${txCount > 0 ? 'count' : 'zero'}">${txCount} giao dịch</span>
-                                <span class="badge ${catCount > 0 ? 'category' : 'zero'}">${catCount} danh mục</span>
-                                <span class="badge ${sgCount > 0 ? 'savings' : 'zero'}">${sgCount} tích lũy</span>
-                                <span class="badge ${mbCount > 0 ? 'budget' : 'zero'}">${mbCount} ngân sách</span>
-                                <span class="badge ${rtCount > 0 ? 'recurring' : 'zero'}">${rtCount} định kỳ</span>
-                            </div>
-                        </td>
-                        <td>
-                            <button class="btn-action" onclick="viewTransactions(${user.id}, '${user.name}', '${user.email}')" ${txCount === 0 ? 'disabled style="opacity: 0.5; cursor: not-allowed;"' : ''}>
-                                <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
-                                Xem chi tiết
-                            </button>
+                            <span class="${syncStatusBadgeClass}" style="font-size: 0.875rem; padding: 0.5rem 1.25rem; border-radius: 8px;">
+                                ${syncStatusText}
+                            </span>
                         </td>
                     </tr>
                 `;

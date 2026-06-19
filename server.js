@@ -22,6 +22,12 @@ async function initDatabase() {
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         `);
+ 
+        await pool.query(`
+            ALTER TABLE users 
+            ADD COLUMN IF NOT EXISTS last_sync_time TIMESTAMP,
+            ADD COLUMN IF NOT EXISTS last_sync_type VARCHAR(50)
+        `);
 
         await pool.query(`
             CREATE TABLE IF NOT EXISTS transactions (
@@ -885,6 +891,37 @@ app.post('/api/sync/transactions', async (req, res) => {
             );
         }
 
+        const clientHasChanges = 
+            !!isFirstSync ||
+            (clientCats.length > 0 && clientCats.some(cc => {
+                const s = serverCats.find(sc => sc.id === cc.id);
+                return !s || s.name !== cc.name || s.color !== cc.color || s.icon_name !== cc.icon_name || parseInt(s.budget_limit) !== parseInt(cc.budgetLimit);
+            })) ||
+            (clientSgs.length > 0 && clientSgs.some(csg => {
+                const s = serverSgs.find(ss => ss.id === csg.id);
+                return !s || s.title !== csg.title || s.color !== csg.color || s.icon_name !== csg.icon_name || parseFloat(s.target_amount) !== parseFloat(csg.targetAmount) || parseFloat(s.current_amount) !== parseFloat(csg.currentAmount);
+            })) ||
+            (clientMbs.length > 0 && clientMbs.some(cmb => {
+                const s = serverMbs.find(sm => sm.id === cmb.id);
+                return !s || s.month_year !== cmb.monthYear || parseFloat(s.limit_amount) !== parseFloat(cmb.limitAmount);
+            })) ||
+            (clientTxs.length > 0 && clientTxs.some(ct => {
+                const s = serverTxs.find(st => st.id === ct.id);
+                return !s || s.title !== ct.title || parseFloat(s.amount) !== parseFloat(ct.amount) || s.type !== ct.type || s.category !== ct.category || parseInt(s.date) !== parseInt(ct.date) || s.note !== ct.note;
+            })) ||
+            (clientRts.length > 0 && clientRts.some(crt => {
+                const s = serverRts.find(sr => sr.id === crt.id);
+                return !s || s.title !== crt.title || parseFloat(s.amount) !== parseFloat(crt.amount) || s.type !== crt.type || s.category !== crt.category || s.note !== crt.note || s.frequency !== crt.frequency || s.day_of_week !== crt.dayOfWeek || s.day_of_month !== crt.dayOfMonth || parseInt(s.next_execution_date) !== parseInt(crt.nextExecutionDate) || !!s.is_enabled !== !!crt.isEnabled;
+            })) ||
+            (deletedCatIds && deletedCatIds.size > 0) ||
+            (deletedSgIds && deletedSgIds.size > 0) ||
+            (deletedMbIds && deletedMbIds.size > 0) ||
+            (deletedTxIds && deletedTxIds.size > 0) ||
+            (deletedRtIds && deletedRtIds.size > 0);
+
+        const syncType = clientHasChanges ? 'UPDATE' : 'GET';
+        await client.query('UPDATE users SET last_sync_time = CURRENT_TIMESTAMP, last_sync_type = $1 WHERE id = $2', [syncType, accountId]);
+
         await client.query('COMMIT');
 
         // Map lists to response structures matching DTOs
@@ -969,6 +1006,8 @@ app.get('/api/admin/summary', async (req, res) => {
                 u.name, 
                 u.email, 
                 u.created_at, 
+                u.last_sync_time,
+                u.last_sync_type,
                 (SELECT COUNT(*)::integer FROM transactions WHERE account_id = u.id) as transaction_count,
                 (SELECT COUNT(*)::integer FROM categories WHERE account_id = u.id) as category_count,
                 (SELECT COUNT(*)::integer FROM savings_goals WHERE account_id = u.id) as savings_goal_count,
