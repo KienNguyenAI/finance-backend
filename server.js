@@ -106,6 +106,20 @@ async function initDatabase() {
                 PRIMARY KEY (account_id, entity_type, entity_id)
             )
         `);
+ 
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS sync_history (
+                id SERIAL PRIMARY KEY,
+                account_id INTEGER NOT NULL,
+                sync_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                sync_type VARCHAR(50) NOT NULL,
+                tx_count INTEGER DEFAULT 0,
+                cat_count INTEGER DEFAULT 0,
+                sg_count INTEGER DEFAULT 0,
+                mb_count INTEGER DEFAULT 0,
+                rt_count INTEGER DEFAULT 0
+            )
+        `);
 
         // Alter tables to add last_modified if not exists
         const tables = ['transactions', 'categories', 'savings_goals', 'monthly_budgets', 'recurring_transactions'];
@@ -922,6 +936,11 @@ app.post('/api/sync/transactions', async (req, res) => {
         const syncType = clientHasChanges ? 'UPDATE' : 'GET';
         await client.query('UPDATE users SET last_sync_time = CURRENT_TIMESTAMP, last_sync_type = $1 WHERE id = $2', [syncType, accountId]);
 
+        await client.query(`
+            INSERT INTO sync_history (account_id, sync_type, tx_count, cat_count, sg_count, mb_count, rt_count)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `, [accountId, syncType, clientTxs.length, clientCats.length, clientSgs.length, clientMbs.length, clientRts.length]);
+
         await client.query('COMMIT');
 
         // Map lists to response structures matching DTOs
@@ -1045,6 +1064,21 @@ app.get('/api/admin/users/:id/transactions', async (req, res) => {
         res.status(200).json({ transactions: result.rows });
     } catch (err) {
         console.error('Admin transactions error:', err.message);
+        res.status(500).json({ message: 'Lỗi hệ thống: ' + err.message });
+    }
+});
+
+// 6. API Lấy lịch sử đồng bộ của 1 user (cho admin)
+app.get('/api/admin/users/:id/sync-history', async (req, res) => {
+    const userId = req.params.id;
+    try {
+        const result = await pool.query(
+            'SELECT id, sync_time, sync_type, tx_count, cat_count, sg_count, mb_count, rt_count FROM sync_history WHERE account_id = $1 ORDER BY sync_time DESC LIMIT 100',
+            [userId]
+        );
+        res.status(200).json({ history: result.rows });
+    } catch (err) {
+        console.error('Admin sync history error:', err.message);
         res.status(500).json({ message: 'Lỗi hệ thống: ' + err.message });
     }
 });

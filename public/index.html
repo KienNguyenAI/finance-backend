@@ -590,7 +590,7 @@
                     <p id="metric-total-users">-</p>
                 </div>
             </div>
-            <div class="metric-card">
+            <div class="metric-card" style="display: none;">
                 <div class="metric-icon purple">
                     <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
                 </div>
@@ -630,12 +630,13 @@
                         <th>Người Dùng</th>
                         <th>Ngày Tạo</th>
                         <th>Trạng Thái Đồng Bộ</th>
+                        <th>Hành Động</th>
                     </tr>
                 </thead>
                 <tbody id="users-table-body">
                     <!-- Dynamic Rows Loaded Here -->
                     <tr>
-                        <td colspan="3">
+                        <td colspan="4">
                             <div class="loader-container">
                                 <div class="spinner"></div>
                                 <p>Đang tải danh sách tài khoản...</p>
@@ -647,12 +648,12 @@
         </div>
     </div>
 
-    <!-- Modal Xem Chi Tiết Giao Dịch -->
+    <!-- Modal Xem Chi Tiết Lịch Sử Đồng Bộ -->
     <div class="modal-backdrop" id="tx-modal">
         <div class="modal-content">
             <div class="modal-header">
                 <div class="modal-title">
-                    <h2 id="modal-user-name">Chi Tiết Giao Dịch</h2>
+                    <h2 id="modal-user-name">Lịch Sử Đồng Bộ</h2>
                     <p id="modal-user-email">email@example.com</p>
                 </div>
                 <button class="btn-close" id="modal-close">&times;</button>
@@ -662,16 +663,13 @@
                     <table>
                         <thead>
                             <tr>
-                                <th>Tiêu Đề</th>
-                                <th>Loại</th>
-                                <th>Số Tiền</th>
-                                <th>Danh Mục</th>
-                                <th>Ngày Giao Dịch</th>
-                                <th>Ghi Chú</th>
+                                <th>Thời Gian</th>
+                                <th>Loại Đồng Bộ</th>
+                                <th>Chi Tiết Bản Ghi Gửi Lên</th>
                             </tr>
                         </thead>
                         <tbody id="tx-table-body">
-                            <!-- Dynamic Transaction Rows -->
+                            <!-- Dynamic Sync History Rows -->
                         </tbody>
                     </table>
                 </div>
@@ -734,7 +732,7 @@
                 console.error(err);
                 usersTableBody.innerHTML = `
                     <tr>
-                        <td colspan="3" style="text-align: center; color: var(--danger); padding: 3rem;">
+                        <td colspan="4" style="text-align: center; color: var(--danger); padding: 3rem;">
                             ⚠️ Lỗi khi kết nối đến API: ${err.message}
                         </td>
                     </tr>
@@ -748,7 +746,7 @@
             if (users.length === 0) {
                 usersTableBody.innerHTML = `
                     <tr>
-                        <td colspan="3">
+                        <td colspan="4">
                             <div class="empty-state">
                                 <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle></svg>
                                 <p>Không tìm thấy tài khoản người dùng nào đã đồng bộ.</p>
@@ -803,22 +801,28 @@
                                 ${syncStatusText}
                             </span>
                         </td>
+                        <td>
+                            <button class="btn-action" onclick="viewSyncHistory(${user.id}, '${user.name}', '${user.email}')">
+                                <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                Xem chi tiết
+                            </button>
+                        </td>
                     </tr>
                 `;
             }).join('');
         }
 
-        // View Transactions for specific user
-        async function viewTransactions(userId, name, email) {
-            modalUserName.innerText = `Lịch sử giao dịch của: ${name}`;
+        // View Sync History for specific user
+        async function viewSyncHistory(userId, name, email) {
+            modalUserName.innerText = `Lịch sử đồng bộ của: ${name}`;
             modalUserEmail.innerText = email;
             
             // Show loading in modal
             txTableBody.innerHTML = `
                 <tr>
-                    <td colspan="6" style="text-align: center; padding: 2rem;">
+                    <td colspan="3" style="text-align: center; padding: 2rem;">
                         <div class="spinner" style="margin: 0 auto 1rem;"></div>
-                        Đang lấy thông tin giao dịch...
+                        Đang lấy lịch sử đồng bộ...
                     </td>
                 </tr>
             `;
@@ -826,17 +830,17 @@
             txModal.classList.add('active');
 
             try {
-                const response = await fetch(`/api/admin/users/${userId}/transactions`);
-                if (!response.ok) throw new Error('Không thể lấy chi tiết giao dịch');
+                const response = await fetch(`/api/admin/users/${userId}/sync-history`);
+                if (!response.ok) throw new Error('Không thể lấy lịch sử đồng bộ');
                 const data = await response.json();
                 
-                const txs = data.transactions || [];
-                renderTransactions(txs);
+                const history = data.history || [];
+                renderSyncHistory(history);
             } catch (err) {
                 console.error(err);
                 txTableBody.innerHTML = `
                     <tr>
-                        <td colspan="6" style="text-align: center; color: var(--danger); padding: 2rem;">
+                        <td colspan="3" style="text-align: center; color: var(--danger); padding: 2rem;">
                             ⚠️ Lỗi: ${err.message}
                         </td>
                     </tr>
@@ -844,44 +848,47 @@
             }
         }
 
-        // Render transactions in modal
-        function renderTransactions(transactions) {
-            if (transactions.length === 0) {
+        // Render sync history in modal
+        function renderSyncHistory(history) {
+            if (history.length === 0) {
                 txTableBody.innerHTML = `
                     <tr>
-                        <td colspan="6" style="text-align: center; padding: 2rem; color: var(--text-secondary);">
-                            Không có giao dịch nào được đồng bộ cho tài khoản này.
+                        <td colspan="3" style="text-align: center; padding: 2rem; color: var(--text-secondary);">
+                            Chưa có lịch sử đồng bộ nào được ghi nhận cho tài khoản này.
                         </td>
                     </tr>
                 `;
                 return;
             }
 
-            txTableBody.innerHTML = transactions.map(tx => {
-                const isIncome = tx.type === 'INCOME' || tx.type === 'thu' || tx.type === 'THU';
-                const typeText = isIncome ? 'Thu' : 'Chi';
-                const typeClass = isIncome ? 'tx-badge income' : 'tx-badge expense';
-                const amountClass = isIncome ? 'amount-text income' : 'amount-text expense';
-                const amountSign = isIncome ? '+' : '-';
-                
-                const formattedAmount = new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(tx.amount);
-                
-                const txDate = new Date(parseInt(tx.date)).toLocaleDateString('vi-VN', {
+            txTableBody.innerHTML = history.map(log => {
+                const syncTime = new Date(log.sync_time).toLocaleDateString('vi-VN', {
                     year: 'numeric',
                     month: '2-digit',
                     day: '2-digit',
                     hour: '2-digit',
-                    minute: '2-digit'
+                    minute: '2-digit',
+                    second: '2-digit'
                 });
+                
+                const isUpdate = log.sync_type === 'UPDATE';
+                const typeText = isUpdate ? 'UPDATE' : 'GET';
+                const typeClass = isUpdate ? 'tx-badge income' : 'tx-badge expense';
+                
+                const details = [];
+                if (log.tx_count > 0) details.push(`<span class="badge count">${log.tx_count} giao dịch</span>`);
+                if (log.cat_count > 0) details.push(`<span class="badge category">${log.cat_count} danh mục</span>`);
+                if (log.sg_count > 0) details.push(`<span class="badge savings">${log.sg_count} heo đất</span>`);
+                if (log.mb_count > 0) details.push(`<span class="badge budget">${log.mb_count} hạn mức</span>`);
+                if (log.rt_count > 0) details.push(`<span class="badge recurring">${log.rt_count} định kỳ</span>`);
+                
+                const detailsText = details.length > 0 ? `<div style="display: flex; flex-wrap: wrap; gap: 0.3rem;">${details.join('')}</div>` : '<span style="color: var(--text-secondary); font-style: italic;">Không gửi dữ liệu mới</span>';
 
                 return `
                     <tr>
-                        <td style="font-weight: 500;">${tx.title}</td>
+                        <td style="font-size: 0.875rem; color: var(--text-primary); font-family: monospace;">${syncTime}</td>
                         <td><span class="${typeClass}">${typeText}</span></td>
-                        <td><span class="${amountClass}">${amountSign}${formattedAmount}</span></td>
-                        <td>${tx.category}</td>
-                        <td style="font-size: 0.8125rem; color: var(--text-secondary);">${txDate}</td>
-                        <td style="font-size: 0.8125rem; color: var(--text-secondary); font-style: italic;">${tx.note || '_'}</td>
+                        <td>${detailsText}</td>
                     </tr>
                 `;
             }).join('');
