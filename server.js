@@ -248,12 +248,34 @@ app.post('/api/sync/transactions', async (req, res) => {
     try {
         await client.query('BEGIN');
 
+        // Check which items have been deleted previously on the server
+        const dbDeletedResult = await client.query(
+            'SELECT entity_type, entity_id FROM deleted_items WHERE account_id = $1',
+            [accountId]
+        );
+        const serverDeletedMap = {
+            category: new Set(),
+            savings_goal: new Set(),
+            monthly_budget: new Set(),
+            recurring_transaction: new Set(),
+            transaction: new Set()
+        };
+        dbDeletedResult.rows.forEach(row => {
+            if (serverDeletedMap[row.entity_type]) {
+                serverDeletedMap[row.entity_type].add(row.entity_id);
+            }
+        });
+
+        const shouldFilterDeleted = clientLastSync > 0 && !isFirstSync;
+
         // ==========================================
         // 1. Synchronize Categories
         // ==========================================
         const serverCatResult = await client.query('SELECT * FROM categories WHERE account_id = $1', [accountId]);
         const serverCats = serverCatResult.rows;
-        const clientCats = categories || [];
+        const clientCats = shouldFilterDeleted 
+            ? (categories || []).filter(cc => !serverDeletedMap.category.has(cc.id.toString()))
+            : (categories || []);
 
         const deletedCatIds = new Set();
         if (clientLastSync > 0) {
@@ -369,12 +391,24 @@ app.post('/api/sync/transactions', async (req, res) => {
             );
         }
 
+        // Save deleted categories to deleted_items
+        for (const catId of deletedCatIds) {
+            await client.query(
+                `INSERT INTO deleted_items (account_id, entity_type, entity_id)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (account_id, entity_type, entity_id) DO NOTHING`,
+                [accountId, 'category', catId.toString()]
+            );
+        }
+
         // ==========================================
         // 2. Synchronize Savings Goals
         // ==========================================
         const serverSgResult = await client.query('SELECT * FROM savings_goals WHERE account_id = $1', [accountId]);
         const serverSgs = serverSgResult.rows;
-        const clientSgs = savingsGoals || [];
+        const clientSgs = shouldFilterDeleted
+            ? (savingsGoals || []).filter(csg => !serverDeletedMap.savings_goal.has(csg.id.toString()))
+            : (savingsGoals || []);
 
         const deletedSgIds = new Set();
         if (clientLastSync > 0) {
@@ -502,12 +536,24 @@ app.post('/api/sync/transactions', async (req, res) => {
             );
         }
 
+        // Save deleted savings goals to deleted_items
+        for (const sgId of deletedSgIds) {
+            await client.query(
+                `INSERT INTO deleted_items (account_id, entity_type, entity_id)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (account_id, entity_type, entity_id) DO NOTHING`,
+                [accountId, 'savings_goal', sgId.toString()]
+            );
+        }
+
         // ==========================================
         // 3. Synchronize Monthly Budgets
         // ==========================================
         const serverMbResult = await client.query('SELECT * FROM monthly_budgets WHERE account_id = $1', [accountId]);
         const serverMbs = serverMbResult.rows;
-        const clientMbs = monthlyBudgets || [];
+        const clientMbs = shouldFilterDeleted
+            ? (monthlyBudgets || []).filter(cmb => !serverDeletedMap.monthly_budget.has(cmb.id.toString()))
+            : (monthlyBudgets || []);
 
         const deletedMbIds = new Set();
         if (clientLastSync > 0) {
@@ -610,12 +656,24 @@ app.post('/api/sync/transactions', async (req, res) => {
             );
         }
 
+        // Save deleted monthly budgets to deleted_items
+        for (const mbId of deletedMbIds) {
+            await client.query(
+                `INSERT INTO deleted_items (account_id, entity_type, entity_id)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (account_id, entity_type, entity_id) DO NOTHING`,
+                [accountId, 'monthly_budget', mbId.toString()]
+            );
+        }
+
         // ==========================================
         // 4. Synchronize Recurring Transactions
         // ==========================================
         const serverRtResult = await client.query('SELECT * FROM recurring_transactions WHERE account_id = $1', [accountId]);
         const serverRts = serverRtResult.rows;
-        const clientRts = recurringTransactions || [];
+        const clientRts = shouldFilterDeleted
+            ? (recurringTransactions || []).filter(crt => !serverDeletedMap.recurring_transaction.has(crt.id.toString()))
+            : (recurringTransactions || []);
 
         const deletedRtIds = new Set();
         if (clientLastSync > 0) {
@@ -769,12 +827,24 @@ app.post('/api/sync/transactions', async (req, res) => {
             );
         }
 
+        // Save deleted recurring transactions to deleted_items
+        for (const rtId of deletedRtIds) {
+            await client.query(
+                `INSERT INTO deleted_items (account_id, entity_type, entity_id)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (account_id, entity_type, entity_id) DO NOTHING`,
+                [accountId, 'recurring_transaction', rtId.toString()]
+            );
+        }
+
         // ==========================================
         // 5. Synchronize Transactions
         // ==========================================
         const serverTxResult = await client.query('SELECT * FROM transactions WHERE account_id = $1', [accountId]);
         const serverTxs = serverTxResult.rows;
-        const clientTxs = transactions || [];
+        const clientTxs = shouldFilterDeleted
+            ? (transactions || []).filter(ct => !serverDeletedMap.transaction.has(ct.id.toString()))
+            : (transactions || []);
 
         const deletedTxIds = new Set();
         if (clientLastSync > 0) {
@@ -902,6 +972,16 @@ app.post('/api/sync/transactions', async (req, res) => {
                 `INSERT INTO transactions (id, account_id, title, amount, type, category, date, note, last_modified)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
                 [tx.id, tx.account_id, tx.title, tx.amount, tx.type, tx.category, tx.date, tx.note || '', tx.last_modified]
+            );
+        }
+
+        // Save deleted transactions to deleted_items
+        for (const txId of deletedTxIds) {
+            await client.query(
+                `INSERT INTO deleted_items (account_id, entity_type, entity_id)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (account_id, entity_type, entity_id) DO NOTHING`,
+                [accountId, 'transaction', txId.toString()]
             );
         }
 
